@@ -1,3 +1,0 @@
--keep class com.zilo.libopenzilo.** { *; }
--keep class com.sun.jna.** { *; }
--keepclasseswithmembers class * extends com.sun.jna.Structure { <fields>; }

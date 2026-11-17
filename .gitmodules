@@ -1,0 +1,3 @@
+[submodule "vendor/connect"]
+	path = vendor/connect
+	url = https://github.com/ziloai/OpenZilo-Connect.git

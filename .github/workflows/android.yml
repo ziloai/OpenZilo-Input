@@ -24,6 +24,14 @@ jobs:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
         with:
           persist-credentials: false
+      - name: Check out pinned dependencies
+        env:
+          REPO_READ_TOKEN: ${{ secrets.REPO_READ_TOKEN }}
+        run: |
+          test -n "$REPO_READ_TOKEN" || { echo "REPO_READ_TOKEN must grant read access to the private OpenZilo-Connect and libopenzilo repositories"; exit 1; }
+          auth="url.https://x-access-token:${REPO_READ_TOKEN}@github.com/.insteadOf=https://github.com/"
+          git -c "$auth" submodule update --init vendor/connect
+          git -C vendor/connect -c "$auth" submodule update --init vendor/libopenzilo
       - uses: actions/setup-java@b6effb05e454b25005698d916606bdc6ffcbf961
         with:
           distribution: temurin
