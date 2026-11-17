@@ -1,0 +1,20 @@
+<resources>
+    <string name="speech_local_title">本地语音识别</string>
+    <string name="speech_model_name">SenseVoice · INT8</string>
+    <string name="speech_model_languages">中文、英语、日语、韩语、粤语</string>
+    <string name="speech_model_checking">正在检查模型</string>
+    <string name="speech_model_downloading">正在下载模型</string>
+    <string name="speech_model_verifying">正在校验下载文件</string>
+    <string name="speech_model_ready">已就绪</string>
+    <string name="speech_model_failed">模型不可用</string>
+    <string name="speech_model_missing">尚未下载</string>
+    <string name="speech_model_size">手动下载 · 229 MiB · 可使用移动网络</string>
+    <string name="speech_model_license">模型许可</string>
+    <string name="speech_model_retry_detail">下载或模型校验失败，请重试下载。</string>
+    <string name="speech_model_percent">%1$d%%</string>
+    <string name="speech_model_progress">%1$.1f / %2$.1f MiB</string>
+    <string name="speech_model_privacy">仅下载模型。语音在本机识别，不上传音频。</string>
+    <string name="speech_model_download">下载模型</string>
+    <string name="speech_model_retry">重新下载</string>
+    <string name="speech_acceleration_cpu">CPU · INT8 · %1$d 线程</string>
+</resources>

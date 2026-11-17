@@ -1,0 +1,3 @@
+-dontwarn java.awt.**
+-dontwarn javax.swing.**
+-keep class com.k2fsa.sherpa.onnx.** { *; }

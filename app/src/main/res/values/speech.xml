@@ -1,0 +1,20 @@
+<resources>
+    <string name="speech_local_title">Local speech recognition</string>
+    <string name="speech_model_name">SenseVoice · INT8</string>
+    <string name="speech_model_languages">Chinese, English, Japanese, Korean and Cantonese</string>
+    <string name="speech_model_checking">Checking model</string>
+    <string name="speech_model_downloading">Downloading model</string>
+    <string name="speech_model_verifying">Verifying download</string>
+    <string name="speech_model_ready">Ready</string>
+    <string name="speech_model_failed">Model unavailable</string>
+    <string name="speech_model_missing">Not downloaded</string>
+    <string name="speech_model_size">Manual download · 229 MiB · Mobile data allowed</string>
+    <string name="speech_model_license">Model license</string>
+    <string name="speech_model_retry_detail">The download or model check failed. Retry the download.</string>
+    <string name="speech_model_percent">%1$d%%</string>
+    <string name="speech_model_progress">%1$.1f / %2$.1f MiB</string>
+    <string name="speech_model_privacy">Only the model is downloaded. Speech recognition runs on this phone; audio is not uploaded.</string>
+    <string name="speech_model_download">Download model</string>
+    <string name="speech_model_retry">Retry download</string>
+    <string name="speech_acceleration_cpu">CPU · INT8 · %1$d threads</string>
+</resources>
