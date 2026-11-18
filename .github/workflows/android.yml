@@ -16,7 +16,7 @@ concurrency:
 
 jobs:
   build:
-    runs-on: ${{ vars.CI_RUNNER || 'zilo-linux' }}
+    runs-on: ${{ vars.CI_RUNNER || 'ubuntu-latest' }}
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
