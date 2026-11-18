@@ -16,7 +16,7 @@ concurrency:
 
 jobs:
   build:
-    runs-on: ubuntu-24.04
+    runs-on: ${{ vars.CI_RUNNER || 'zilo-linux' }}
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
@@ -26,9 +26,11 @@ jobs:
         env:
           REPO_READ_TOKEN: ${{ secrets.REPO_READ_TOKEN }}
         run: |
-          test -n "$REPO_READ_TOKEN" || { echo "REPO_READ_TOKEN must grant read access to the private OpenZilo-Connect repository"; exit 1; }
-          auth="url.https://x-access-token:${REPO_READ_TOKEN}@github.com/.insteadOf=https://github.com/"
-          git -c "$auth" submodule update --init vendor/connect
+          auth=""
+          if [ -n "$REPO_READ_TOKEN" ]; then
+            auth="url.https://x-access-token:${REPO_READ_TOKEN}@github.com/.insteadOf=https://github.com/"
+          fi
+          git ${auth:+-c "$auth"} submodule update --init vendor/connect
       - uses: actions/setup-java@b6effb05e454b25005698d916606bdc6ffcbf961
         with:
           distribution: temurin
