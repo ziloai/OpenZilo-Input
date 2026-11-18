@@ -5,6 +5,7 @@ local.properties
 *.jks
 *.keystore
 captures/
+/vendor/connect/
 **/target/
 __pycache__/
 *.pem

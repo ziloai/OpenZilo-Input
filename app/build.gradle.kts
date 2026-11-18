@@ -9,8 +9,8 @@ android {
         applicationId = "com.openzilo.input"
         minSdk = 33
         targetSdk = 37
-        versionCode = 1
-        versionName = "0.1.0"
+        versionCode = providers.gradleProperty("inputVersionCode").get().toInt()
+        versionName = providers.gradleProperty("inputVersion").get()
         ndk { abiFilters += listOf("arm64-v8a", "x86_64") }
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
@@ -38,7 +38,8 @@ val fetchSpeechRuntime = tasks.register<Exec>("fetchSpeechRuntime") {
 }
 dependencies {
     implementation(files(speechRuntime).builtBy(fetchSpeechRuntime))
-    implementation(project(":connect-api"))
+    implementation("io.github.ziloai:connect-api:0.1.1@aar")
+    implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.10.2")
     implementation("androidx.activity:activity-compose:1.13.0")
     implementation("androidx.compose.ui:ui:1.12.1")
     implementation("androidx.compose.foundation:foundation:1.12.1")

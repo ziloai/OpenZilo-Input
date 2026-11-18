@@ -16,40 +16,70 @@ concurrency:
 
 jobs:
   build:
-    runs-on: ${{ vars.CI_RUNNER || 'ubuntu-latest' }}
+    runs-on: ubuntu-24.04
     timeout-minutes: 45
+    outputs:
+      version: ${{ steps.version.outputs.version }}
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
         with:
           persist-credentials: false
-      - name: Check out pinned dependencies
-        env:
-          REPO_READ_TOKEN: ${{ secrets.REPO_READ_TOKEN }}
+      - name: Validate release tag
+        if: startsWith(github.ref, 'refs/tags/')
+        id: version
         run: |
-          auth=""
-          if [ -n "$REPO_READ_TOKEN" ]; then
-            auth="url.https://x-access-token:${REPO_READ_TOKEN}@github.com/.insteadOf=https://github.com/"
-          fi
-          git ${auth:+-c "$auth"} submodule update --init vendor/connect
+          [[ "$GITHUB_REF_NAME" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]
+          version="${GITHUB_REF_NAME#v}"
+          grep -Fxq "inputVersion=$version" gradle.properties
+          printf 'version=%s\n' "$version" >> "$GITHUB_OUTPUT"
       - uses: actions/setup-java@b6effb05e454b25005698d916606bdc6ffcbf961
         with:
           distribution: temurin
           java-version: '21'
       - name: Install Android SDK
-        run: sdkmanager 'platforms;android-37.0' 'build-tools;37.0.0'
+        uses: android-actions/setup-android@be39fa834029ff78f1a44aa3bb0819b8fc2bd8fd
+        with:
+          packages: platforms;android-37.0 build-tools;37.0.0
       - uses: gradle/actions/setup-gradle@0723195856401067f7a2779048b490ace7a47d7c
       - name: Test, lint and package
-        run: ./gradlew --no-daemon --max-workers=2 '-Dorg.gradle.jvmargs=-Xmx3g -Dfile.encoding=UTF-8' testDebugUnitTest lintDebug assembleDebug bundleRelease
-      - name: Upload packages and reports
-        if: always()
-        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f
+        run: ./gradlew --no-daemon --max-workers=2 '-Dorg.gradle.jvmargs=-Xmx3g -Dfile.encoding=UTF-8' testDebugUnitTest lintDebug assembleDebug assembleDebugAndroidTest bundleRelease
+      - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f
         with:
-          name: OpenZiloInput-${{ github.sha }}
+          name: OpenZiloInput-packages
           if-no-files-found: error
           retention-days: 14
           path: |
-            app/build/outputs/apk/debug/*.apk
-            app/build/outputs/bundle/release/*.aab
+            app/build/outputs/apk/debug/app-debug.apk
+            app/build/outputs/bundle/release/app-release.aab
+      - name: Upload test and lint reports
+        if: always()
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f
+        with:
+          name: OpenZiloInput-reports
+          if-no-files-found: ignore
+          retention-days: 14
+          path: |
             **/build/reports/tests/**
             **/build/reports/lint-results-debug.*
             **/build/test-results/testDebugUnitTest/*.xml
+
+  publish:
+    if: startsWith(github.ref, 'refs/tags/')
+    needs: build
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      VERSION: ${{ needs.build.outputs.version }}
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: OpenZiloInput-packages
+      - name: Publish APK and AAB
+        run: |
+          mv apk/debug/app-debug.apk "OpenZilo-Input-$VERSION-debug.apk"
+          mv bundle/release/app-release.aab "OpenZilo-Input-$VERSION-unsigned.aab"
+          gh release create "$GITHUB_REF_NAME" --verify-tag "OpenZilo-Input-$VERSION-debug.apk" \
+            "OpenZilo-Input-$VERSION-unsigned.aab" --repo "$GITHUB_REPOSITORY" --title "OpenZilo Input $VERSION" \
+            --notes "The APK is debug-signed for testing; the release AAB is unsigned. Install a compatible OpenZilo Connect app before using Input."
