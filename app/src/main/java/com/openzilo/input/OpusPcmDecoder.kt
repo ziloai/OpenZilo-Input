@@ -10,6 +10,162 @@ import java.nio.ByteOrder
 
 internal data class DecodedAudio(val pcm: ByteArray, val sampleRate: Int, val channels: Int)
 
+internal class OpusStreamDecoder(private val channels: Int) : AutoCloseable {
+    private val codec: MediaCodec
+    private val info = MediaCodec.BufferInfo()
+    private val pending = ArrayDeque<ByteArray>()
+    private var started = false
+    private var eosQueued = false
+    private var inputEnded = false
+    private var outputEnded = false
+    private var queueIndex = 0L
+    private var totalBytes = 0L
+    var sampleRate = 0
+        private set
+    private var outputChannels = 0
+
+    init {
+        require(channels in 1..2) { "Unsupported Opus channel count" }
+        val format = MediaFormat.createAudioFormat(MediaFormat.MIMETYPE_AUDIO_OPUS, 48_000, channels).apply {
+            setInteger(MediaFormat.KEY_PCM_ENCODING, AudioFormat.ENCODING_PCM_16BIT)
+            setByteBuffer("csd-0", ByteBuffer.allocate(19).order(ByteOrder.LITTLE_ENDIAN).apply {
+                put("OpusHead".toByteArray(Charsets.US_ASCII))
+                put(1.toByte())
+                put(channels.toByte())
+                putShort(0.toShort())
+                putInt(16_000)
+                putShort(0.toShort())
+                put(0.toByte())
+                flip()
+            })
+            setByteBuffer("csd-1", playbackTime(0))
+            setByteBuffer("csd-2", playbackTime(80_000_000))
+        }
+        codec = MediaCodec.createDecoderByType(MediaFormat.MIMETYPE_AUDIO_OPUS)
+        try {
+            codec.configure(format, null, null, 0)
+            codec.start()
+            started = true
+        } catch (error: Exception) {
+            codec.release()
+            throw error
+        }
+    }
+
+    fun feed(packet: ByteArray): ByteArray {
+        require(packet.size in 1..100) { "Invalid Opus packet size" }
+        check(!inputEnded) { "Opus stream already ended" }
+        pending.addLast(packet)
+        queueInput()
+        return drain(0)
+    }
+
+    fun finish(): ByteArray {
+        check(started) { "Opus stream was closed" }
+        inputEnded = true
+        val output = ByteArrayOutputStream()
+        val deadline = SystemClock.elapsedRealtime() + 5_000
+        while (true) {
+            queueInput()
+            output.write(drain(10))
+            if (outputEnded) break
+            check(SystemClock.elapsedRealtime() < deadline) { "Opus decoding timed out" }
+            check(!Thread.currentThread().isInterrupted) { "Opus decoding interrupted" }
+        }
+        check(totalBytes > 0 && sampleRate != 0 && outputChannels != 0) { "Opus recording contains no decoded audio" }
+        return output.toByteArray()
+    }
+
+    private fun queueInput() {
+        while (pending.isNotEmpty()) {
+            val index = codec.dequeueInputBuffer(0)
+            if (index < 0) return
+            val buffer = checkNotNull(codec.getInputBuffer(index))
+            val packet = pending.removeFirst()
+            check(buffer.remaining() >= packet.size) { "Opus decoder input buffer is too small" }
+            buffer.clear()
+            buffer.put(packet)
+            codec.queueInputBuffer(index, 0, packet.size, queueIndex * 20_000L, 0)
+            queueIndex++
+        }
+        if (inputEnded && !eosQueued) {
+            val index = codec.dequeueInputBuffer(0)
+            if (index >= 0) {
+                codec.queueInputBuffer(index, 0, 0, queueIndex * 20_000L, MediaCodec.BUFFER_FLAG_END_OF_STREAM)
+                eosQueued = true
+            }
+        }
+    }
+
+    private fun drain(timeout: Long): ByteArray {
+        val output = ByteArrayOutputStream()
+        while (true) {
+            when (val index = codec.dequeueOutputBuffer(info, timeout)) {
+                MediaCodec.INFO_OUTPUT_FORMAT_CHANGED -> readOutputFormat(codec.outputFormat)
+                MediaCodec.INFO_TRY_AGAIN_LATER, MediaCodec.INFO_OUTPUT_BUFFERS_CHANGED -> return output.toByteArray()
+                else -> if (index >= 0) {
+                    try {
+                        if (info.size > 0 && info.flags and MediaCodec.BUFFER_FLAG_CODEC_CONFIG == 0) {
+                            readOutputFormat(codec.getOutputFormat(index))
+                            require(info.size % (outputChannels * 2) == 0) { "Unaligned PCM16 output" }
+                            totalBytes += info.size
+                            check(totalBytes <= sampleRate.toLong() * 2 * outputChannels * 60) { "Decoded audio exceeds the recording limit" }
+                            val buffer = checkNotNull(codec.getOutputBuffer(index))
+                            buffer.position(info.offset)
+                            buffer.limit(info.offset + info.size)
+                            val bytes = ByteArray(info.size)
+                            buffer.get(bytes)
+                            output.write(if (outputChannels == 2) downmix(bytes) else bytes)
+                        }
+                        if (info.flags and MediaCodec.BUFFER_FLAG_END_OF_STREAM != 0) {
+                            outputEnded = true
+                            return output.toByteArray()
+                        }
+                    } finally {
+                        codec.releaseOutputBuffer(index, false)
+                    }
+                }
+            }
+        }
+    }
+
+    private fun readOutputFormat(value: MediaFormat) {
+        val rate = value.getInteger(MediaFormat.KEY_SAMPLE_RATE)
+        val count = value.getInteger(MediaFormat.KEY_CHANNEL_COUNT)
+        require(rate in 8_000..48_000 && count == channels) { "Unsupported decoded audio format" }
+        require(value.getInteger(MediaFormat.KEY_PCM_ENCODING, AudioFormat.ENCODING_PCM_16BIT) == AudioFormat.ENCODING_PCM_16BIT) {
+            "Opus decoder did not produce PCM16"
+        }
+        check(sampleRate == 0 || (sampleRate == rate && outputChannels == count)) { "Decoded audio format changed" }
+        sampleRate = rate
+        outputChannels = count
+    }
+
+    private fun downmix(bytes: ByteArray): ByteArray {
+        val input = ByteBuffer.wrap(bytes).order(ByteOrder.nativeOrder())
+        val output = ByteBuffer.allocate(bytes.size / 2).order(ByteOrder.nativeOrder())
+        while (input.hasRemaining()) {
+            val left = input.short.toInt()
+            val right = input.short.toInt()
+            output.putShort(((left + right) / 2).toShort())
+        }
+        return output.array()
+    }
+
+    private fun playbackTime(value: Long): ByteBuffer =
+        ByteBuffer.allocate(8).order(ByteOrder.nativeOrder()).apply { putLong(value); flip() }
+
+    override fun close() {
+        if (!started) return
+        started = false
+        try {
+            codec.stop()
+        } finally {
+            codec.release()
+        }
+    }
+}
+
 internal object OpusPcmDecoder {
     fun decode(packets: List<ByteArray>, channels: Int): DecodedAudio {
         require(channels in 1..2 && packets.size in 1..3000) { "Unsupported Opus recording" }

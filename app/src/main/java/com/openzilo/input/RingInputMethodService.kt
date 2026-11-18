@@ -63,6 +63,8 @@ class RingInputMethodService : InputMethodService(), LifecycleOwner, SavedStateR
     private var undoText by mutableStateOf("")
     private var cursor = -1
     private var expectedUndoCursor = -1
+    private var previewLength = 0
+    private var previewStart = -1
 
     override fun onCreate() {
         super.onCreate()
@@ -102,8 +104,8 @@ class RingInputMethodService : InputMethodService(), LifecycleOwner, SavedStateR
                         Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
                             TextButton(onClick = { if (!switchToNextInputMethod(false)) getSystemService(InputMethodManager::class.java).showInputMethodPicker() }) { Text(stringResource(R.string.switch_keyboard)) }
                             TextButton(onClick = { undo() }, enabled = undoText.isNotEmpty()) { Text(stringResource(R.string.undo)) }
-                            TextButton(onClick = { currentInputConnection?.commitText(" ", 1); undoText = "" }) { Text(stringResource(R.string.space)) }
-                            TextButton(onClick = { delete() }) { Text(stringResource(R.string.delete)) }
+                            TextButton(onClick = { clearPreview(); currentInputConnection?.commitText(" ", 1); undoText = "" }) { Text(stringResource(R.string.space)) }
+                            TextButton(onClick = { clearPreview(); delete() }) { Text(stringResource(R.string.delete)) }
                             if (state.failed) TextButton(onClick = { startDictation() }) { Text(stringResource(R.string.retry)) }
                         }
                     }
@@ -156,6 +158,10 @@ class RingInputMethodService : InputMethodService(), LifecycleOwner, SavedStateR
 
     override fun onUpdateSelection(oldSelStart: Int, oldSelEnd: Int, newSelStart: Int, newSelEnd: Int, candidatesStart: Int, candidatesEnd: Int) {
         super.onUpdateSelection(oldSelStart, oldSelEnd, newSelStart, newSelEnd, candidatesStart, candidatesEnd)
+        if (previewLength > 0 && (newSelStart != newSelEnd || newSelEnd != previewStart + previewLength)) {
+            previewLength = 0
+            previewStart = -1
+        }
         cursor = newSelEnd
         if (newSelStart != newSelEnd || newSelEnd != expectedUndoCursor) undoText = ""
     }
@@ -175,7 +181,9 @@ class RingInputMethodService : InputMethodService(), LifecycleOwner, SavedStateR
             try {
                 RingDictation(this@RingInputMethodService,
                     update = { if (token == generation) state = it },
-                    insert = { text -> token == generation && visible && insert(text) },
+                    preview = { text -> token == generation && visible && preview(text) },
+                    commit = { text -> token == generation && visible && commit(text) },
+                    clearPreview = { if (token == generation) clearPreview() },
                 ).run()
             } catch (error: CancellationException) {
                 if (error is TimeoutCancellationException && token == generation)
@@ -192,19 +200,42 @@ class RingInputMethodService : InputMethodService(), LifecycleOwner, SavedStateR
         generation++
         running?.cancel()
         state = DictationState("")
+        clearPreview()
     }
 
-    private fun insert(text: String): Boolean {
+    private fun preview(text: String): Boolean {
+        if (text.isEmpty()) return false
         val info = currentInputEditorInfo ?: return false
         if (!permitsDictation(info.inputType, info.imeOptions)) return false
         val connection = currentInputConnection ?: return false
-        expectedUndoCursor = if (cursor >= 0) cursor + text.length else -1
+        val start = if (previewLength > 0) previewStart else cursor
+        if (start < 0) return false
+        if (!connection.setComposingText(text, 1)) return false
+        previewStart = start
+        previewLength = text.length
+        return true
+    }
+
+    private fun commit(text: String): Boolean {
+        val info = currentInputEditorInfo ?: return false
+        if (!permitsDictation(info.inputType, info.imeOptions)) return false
+        val connection = currentInputConnection ?: return false
+        val start = if (previewLength > 0) previewStart else cursor
         val committed = connection.commitText(text, 1)
-        if (committed) {
-            undoText = text
-            cursor = expectedUndoCursor
-        }
-        return committed
+        if (!committed) return false
+        previewLength = 0
+        previewStart = -1
+        expectedUndoCursor = if (start >= 0) start + text.length else -1
+        undoText = if (start >= 0) text else ""
+        cursor = expectedUndoCursor
+        return true
+    }
+
+    private fun clearPreview() {
+        if (previewLength <= 0) return
+        previewLength = 0
+        previewStart = -1
+        currentInputConnection?.setComposingText("", 1)
     }
 
     private fun undo() {

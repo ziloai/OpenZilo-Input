@@ -4,20 +4,23 @@ import android.content.Context
 import android.os.Bundle
 import android.util.Log
 import com.openzilo.connect.api.ConnectClient
-import com.zilo.libopenzilo.LiveEvent
-import com.zilo.libopenzilo.LiveValidator
-import com.zilo.libopenzilo.Packet
+import com.openzilo.connect.api.LiveAudioEvent
+import java.io.ByteArrayOutputStream
 import java.io.IOException
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.TimeoutCancellationException
 import kotlinx.coroutines.awaitCancellation
+import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.coroutineScope
-import kotlinx.coroutines.launch
 import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeout
 import kotlinx.coroutines.withTimeoutOrNull
 
 internal data class DictationState(
@@ -29,19 +32,40 @@ internal data class DictationState(
     val failed: Boolean = false,
 )
 
+private data class CapturedAudio(val pcm: ByteArray, val sampleRate: Int, val streamingText: String)
+
 internal class RingDictation(
     private val context: Context,
     private val update: (DictationState) -> Unit,
-    private val insert: (String) -> Boolean,
+    private val preview: (String) -> Boolean,
+    private val commit: (String) -> Boolean,
+    private val clearPreview: () -> Unit,
 ) {
+    private suspend fun finalize(audio: CapturedAudio) {
+        val whole = withTimeout(75_000) {
+            runCatching { (context.applicationContext as InputApplication).recognize(DecodedAudio(audio.pcm, audio.sampleRate, 1)) }
+                .getOrElse { error ->
+                    if (error is CancellationException) throw error
+                    Log.w("OpenZiloInput", "Full recognition failed, keeping the live transcript", error)
+                    ""
+                }
+        }.trim()
+        val text = polishTranscript(whole.ifEmpty { audio.streamingText })
+        if (text.isEmpty()) {
+            clearPreview()
+            update(DictationState(context.getString(R.string.speech_no_match), failed = true))
+            return
+        }
+        val accepted = commit(text)
+        update(DictationState(context.getString(if (accepted) R.string.inserted else R.string.input_rejected), preview = text, failed = !accepted))
+    }
+
     suspend fun run(): Unit = coroutineScope {
         val host = context.applicationContext as InputApplication
-        val model = kotlinx.coroutines.withTimeout(10_000) { host.speechModels.state.first { it.stage != "checking" } }
+        val model = withTimeout(10_000) { host.speechModels.state.first { it.stage != "checking" } }
         check(model.stage == "ready") { context.getString(R.string.local_unavailable) }
         val client = ConnectClient(context)
-        var validator: LiveValidator? = null
-        var packets = mutableListOf<ByteArray>()
-        var channels = 1
+        var session: LiveSession? = null
         var recognition: Job? = null
         var subscribed = false
         val ready = { update(DictationState(context.getString(R.string.hold_ring))) }
@@ -49,64 +73,66 @@ internal class RingDictation(
             update(DictationState(context.getString(R.string.connecting)))
             client.connect()
             val status = client.status()
+            check(status.getInt("apiVersion") == ConnectClient.API_VERSION) { context.getString(R.string.connect_update_required) }
             check(status.getString("phase") == "connected") { context.getString(R.string.connect_ring_first) }
             launch {
                 client.events.collect { event ->
-                    if (event.topic != "live") return@collect
-                    val command = event.data.getInt("command")
-                    val body = event.data.getByteArray("body") ?: throw IOException(context.getString(R.string.incomplete_audio))
-                    if (command == 0x50f) {
-                        validator?.close()
-                        validator = null
-                        packets = mutableListOf()
-                        if (recognition?.isActive == true) return@collect
-                        validator = LiveValidator()
-                    }
-                    val stream = validator ?: return@collect
                     try {
-                        when (val value = stream.accept(Packet(command.toUShort(), body, 4u, 0u))) {
-                            is LiveEvent.Start -> {
-                                channels = value.value.channels.toInt()
-                                Log.i("OpenZiloInput", "Ring audio START: channels=$channels")
+                        when (val value = event.liveAudio() ?: return@collect) {
+                            is LiveAudioEvent.Started -> {
+                                session?.abort()
+                                session = null
+                                if (recognition?.isActive == true) return@collect
+                                val live = LiveSession(host, value.sessionId, value.channels, preview)
+                                live.start(this)
+                                session = live
                                 update(DictationState(context.getString(R.string.listening), recording = true))
                             }
-                            is LiveEvent.Data -> {
-                                packets.add(value.value.data)
-                                update(DictationState(context.getString(R.string.listening), recording = true, seconds = packets.size / 50))
+                            is LiveAudioEvent.Frame -> {
+                                val live = session ?: return@collect
+                                live.add(value)
+                                update(DictationState(context.getString(R.string.listening), recording = true, seconds = live.count / 50))
                             }
-                            is LiveEvent.End -> {
-                                val audioPackets = packets.toList()
-                                Log.i("OpenZiloInput", "Ring audio END: validated packets=${audioPackets.size}")
-                                val audioChannels = channels
-                                packets.clear()
-                                stream.close()
-                                validator = null
-                                if (audioPackets.isEmpty()) { ready(); return@collect }
+                            is LiveAudioEvent.Ended -> {
+                                val live = session ?: return@collect
+                                live.checkEnd(value)
+                                session = null
+                                if (live.count == 0) {
+                                    live.abort()
+                                    ready()
+                                    return@collect
+                                }
+                                Log.i("OpenZiloInput", "Ring audio END: validated packets=${live.count}")
                                 recognition = launch {
                                     try {
                                         update(DictationState(context.getString(R.string.recognizing), processing = true))
-                                        val audio = withContext(Dispatchers.Default) { OpusPcmDecoder.decode(audioPackets, audioChannels) }
-                                        val text = kotlinx.coroutines.withTimeout(75_000) { host.recognize(audio) }.trim()
-                                        if (text.isNotEmpty()) {
-                                            val accepted = insert(text)
-                                            update(DictationState(context.getString(if (accepted) R.string.inserted else R.string.input_rejected), preview = text, failed = !accepted))
-                                        } else update(DictationState(context.getString(R.string.speech_no_match), failed = true))
+                                        val audio = withTimeout(30_000) { live.finish() }
+                                        finalize(audio)
                                     } catch (error: TimeoutCancellationException) {
+                                        live.abort()
+                                        clearPreview()
                                         update(DictationState(context.getString(R.string.speech_failed), failed = true))
-                                    } catch (error: CancellationException) { throw error }
-                                    catch (error: Exception) {
+                                    } catch (error: CancellationException) {
+                                        throw error
+                                    } catch (error: Exception) {
                                         Log.e("OpenZiloInput", "Audio decoding or recognition failed", error)
+                                        live.abort()
+                                        clearPreview()
                                         update(DictationState(error.message ?: context.getString(R.string.speech_failed), failed = true))
                                     }
                                 }
                             }
+                            LiveAudioEvent.Interrupted -> {
+                                if (session == null) return@collect
+                                throw IOException(context.getString(R.string.incomplete_audio))
+                            }
                         }
                     } catch (error: Exception) {
                         if (error is CancellationException) throw error
-                        Log.e("OpenZiloInput", "Ring audio validation failed", error)
-                        validator?.close()
-                        validator = null
-                        packets.clear()
+                        Log.e("OpenZiloInput", "Ring audio delivery failed", error)
+                        session?.abort()
+                        session = null
+                        clearPreview()
                         update(DictationState(context.getString(R.string.incomplete_audio), failed = true))
                     }
                 }
@@ -119,15 +145,119 @@ internal class RingDictation(
             ready()
             awaitCancellation()
         } finally {
+            session?.abort()
             recognition?.cancel()
-            validator?.close()
-            packets.clear()
             withContext(NonCancellable) {
                 if (subscribed) withTimeoutOrNull(2_000) {
                     runCatching { client.execute("live.subscribe", Bundle().apply { putBoolean("enabled", false) }, 1_500) }
                 }
                 client.close()
             }
+        }
+    }
+}
+
+private class LiveSession(
+    private val host: InputApplication,
+    private val sessionId: Long,
+    channels: Int,
+    private val preview: (String) -> Boolean,
+) {
+    private var received = 0
+    private var receivedBytes = 0L
+    private val channel = Channel<ByteArray>(Channel.UNLIMITED)
+    private val result = CompletableDeferred<CapturedAudio>()
+    private val decoder = OpusStreamDecoder(channels)
+    private var worker: Job? = null
+
+    val count: Int get() = received
+
+    fun start(scope: CoroutineScope) {
+        worker = scope.launch(Dispatchers.Default) {
+            try {
+                result.complete(capture())
+            } catch (error: CancellationException) {
+                result.cancel(error)
+                throw error
+            } catch (error: Exception) {
+                result.completeExceptionally(error)
+            }
+        }
+    }
+
+    fun add(frame: LiveAudioEvent.Frame) {
+        check(frame.sessionId == sessionId && frame.sequence == received.toLong() && received < 3000)
+        check(channel.trySend(frame.data).isSuccess)
+        received++
+        receivedBytes += frame.data.size
+    }
+
+    fun checkEnd(end: LiveAudioEvent.Ended) {
+        check(end.sessionId == sessionId && end.byteCount == receivedBytes)
+    }
+
+    suspend fun finish(): CapturedAudio {
+        channel.close()
+        return result.await()
+    }
+
+    fun abort() {
+        channel.close()
+        worker?.cancel()
+    }
+
+    private suspend fun capture(): CapturedAudio {
+        var streamingReady = false
+        try {
+            host.beginStreaming()
+            streamingReady = true
+        } catch (error: CancellationException) {
+            throw error
+        } catch (error: Exception) {
+            Log.w("OpenZiloInput", "Live transcription is unavailable", error)
+        }
+        var streamingText = ""
+        var lastPreview = ""
+        val pcm = ByteArrayOutputStream()
+        try {
+            val pending = ByteArrayOutputStream()
+            var pendingSamples = 0
+            for (packet in channel) {
+                val chunk = decoder.feed(packet)
+                if (chunk.isEmpty()) continue
+                pcm.write(chunk)
+                if (!streamingReady) continue
+                pending.write(chunk)
+                pendingSamples += chunk.size / 2
+                val rate = decoder.sampleRate
+                if (rate <= 0 || pendingSamples < rate * 12 / 100) continue
+                val audio = pending.toByteArray()
+                pending.reset()
+                pendingSamples = 0
+                val text = runCatching { host.acceptStreaming(audio, rate) }.getOrElse { error ->
+                    if (error is CancellationException) throw error
+                    Log.w("OpenZiloInput", "Live transcription failed", error)
+                    streamingReady = false
+                    ""
+                }
+                if (text.isNotEmpty() && text != lastPreview) {
+                    lastPreview = text
+                    withContext(Dispatchers.Main.immediate) { preview(text) }
+                }
+            }
+            pcm.write(decoder.finish())
+            if (streamingReady) {
+                streamingText = runCatching { host.finishStreaming() }.getOrElse { error ->
+                    if (error is CancellationException) throw error
+                    Log.w("OpenZiloInput", "Final live transcription failed", error)
+                    ""
+                }
+            }
+            check(decoder.sampleRate > 0) { "Opus recording contains no decoded audio" }
+            return CapturedAudio(pcm.toByteArray(), decoder.sampleRate, streamingText)
+        } finally {
+            decoder.close()
+            runCatching { host.cancelStreaming() }
         }
     }
 }

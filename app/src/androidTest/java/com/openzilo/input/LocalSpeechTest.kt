@@ -30,6 +30,21 @@ class LocalSpeechTest {
         }
     }
 
+    @Test fun streamingEngineDecodesIncrementallyAndRejectsUseBeforeStart(): Unit = runBlocking {
+        val host = installedHost()
+        try {
+            var failed = false
+            try { host.localSpeech.acceptStreaming(ByteArray(960), 48000) }
+            catch (_: IllegalStateException) { failed = true }
+            assertTrue("Streaming audio was accepted before a session started", failed)
+            host.localSpeech.beginStreaming()
+            val chunk = ByteArray(4800 * 2)
+            repeat(10) { host.localSpeech.acceptStreaming(chunk, 48000) }
+            val text = withTimeout(30_000) { host.localSpeech.finishStreaming() }
+            assertTrue("Silence produced a transcript: $text", text.isEmpty())
+        } finally { host.localSpeech.release() }
+    }
+
     @Test fun localEngineRejectsInvalidPcmAndStillDecodesTheRingSampleRate(): Unit = runBlocking {
         val host = installedHost()
         suspend fun reject(pcm: ByteArray, rate: Int) {

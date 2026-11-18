@@ -5,11 +5,14 @@ import android.content.ComponentName
 import android.content.pm.PackageManager
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
-import com.zilo.libopenzilo.LiveEvent
-import com.zilo.libopenzilo.LiveValidator
-import com.zilo.libopenzilo.Packet
+import android.os.Bundle
+import com.openzilo.connect.api.ConnectClient
+import com.openzilo.connect.api.ConnectEvent
+import com.openzilo.connect.api.LiveAudioEvent
+import java.io.ByteArrayOutputStream
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
+import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertThrows
@@ -22,24 +25,41 @@ class AudioPipelineTest {
     @Test fun validatedStereoOpusBecomesMonoPcmOnTheDevice() {
         val packets = listOf(hex("4c07fd873d831aeb3c3b306a801e4e"), hex("4c07fd32cc09616e63ca3db8f5ca51b578")) +
             List(18) { hex("4c07fd32cca63a250523805d476f894a80") }
-        LiveValidator().use { validator ->
-            val start = ByteBuffer.allocate(20).putInt(1).putInt(0).putInt(0).putInt(0).putShort(16000).put(2).put(3).array()
-            assertTrue(validator.accept(Packet(0x50fu, start, 4u, 0u)) is LiveEvent.Start)
-            var offset = 0
-            packets.forEachIndexed { index, bytes ->
-                val body = ByteBuffer.allocate(14 + bytes.size).putInt(1).putInt(index).putInt(offset).putShort(bytes.size.toShort()).put(bytes).array()
-                assertTrue(validator.accept(Packet(0x510u, body, 4u, 0u)) is LiveEvent.Data)
-                offset += bytes.size
-            }
-            val end = ByteBuffer.allocate(22).putShort(0).putInt(1).putInt(0).putInt(offset).putInt(offset).putInt(0).array()
-            assertTrue(validator.accept(Packet(0x511u, end, 4u, 0u)) is LiveEvent.End)
+        val start = live("started") {
+            putInt("sampleRate", 16000)
+            putInt("channels", 2)
+        }.liveAudio() as LiveAudioEvent.Started
+        val frames = packets.mapIndexed { index, bytes ->
+            val frame = live("frame") {
+                putLong("sequence", index.toLong())
+                putByteArray("data", bytes)
+            }.liveAudio() as LiveAudioEvent.Frame
+            assertEquals(index.toLong(), frame.sequence)
+            frame.data
         }
-        val audio = OpusPcmDecoder.decode(packets, 2)
+        val end = live("ended") { putLong("byteCount", packets.sumOf { it.size }.toLong()) }
+            .liveAudio() as LiveAudioEvent.Ended
+        assertEquals(start.sessionId, end.sessionId)
+        assertEquals(frames.sumOf { it.size }.toLong(), end.byteCount)
+        val audio = OpusPcmDecoder.decode(frames, start.channels)
         assertEquals(1, audio.channels)
         val duration = audio.pcm.size.toDouble() / (audio.sampleRate * 2)
         assertTrue("Decoded duration was $duration", duration in 0.38..0.42)
         val samples = ByteBuffer.wrap(audio.pcm).order(ByteOrder.nativeOrder()).asShortBuffer()
         while (samples.hasRemaining()) assertTrue(kotlin.math.abs(samples.get().toInt()) < 2000)
+    }
+
+    @Test fun incrementalOpusDecodingMatchesTheBatchDecoder() {
+        val packets = listOf(hex("4c07fd873d831aeb3c3b306a801e4e"), hex("4c07fd32cc09616e63ca3db8f5ca51b578")) +
+            List(18) { hex("4c07fd32cca63a250523805d476f894a80") }
+        val batch = OpusPcmDecoder.decode(packets, 2)
+        OpusStreamDecoder(2).use { decoder ->
+            val pcm = ByteArrayOutputStream()
+            packets.forEach { pcm.write(decoder.feed(it)) }
+            pcm.write(decoder.finish())
+            assertEquals(batch.sampleRate, decoder.sampleRate)
+            assertArrayEquals(batch.pcm, pcm.toByteArray())
+        }
     }
 
     @Test fun monoOpusUsesTheActualDecoderSampleRate() {
@@ -50,14 +70,24 @@ class AudioPipelineTest {
         assertTrue(audio.pcm.size.toDouble() / (audio.sampleRate * 2) in 0.38..0.42)
     }
 
-    @Test fun droppedAudioIsRejectedBeforeTranscription() {
-        LiveValidator().use { validator ->
-            val start = ByteBuffer.allocate(20).putInt(1).putInt(0).putInt(0).putInt(0).putShort(16000).put(1).put(3).array()
-            validator.accept(Packet(0x50fu, start, 4u, 0u))
-            val end = ByteBuffer.allocate(22).putShort(0).putInt(1).putInt(0).putInt(100).putInt(0).putInt(1).array()
-            assertThrows(Exception::class.java) { validator.accept(Packet(0x511u, end, 4u, 0u)) }
-        }
+    @Test fun legacyAudioAndMalformedFramesAreRejected() {
+        val legacy = ConnectEvent("live", Bundle().apply {
+            putInt("apiVersion", 1)
+            putInt("command", 0x510)
+            putByteArray("body", byteArrayOf(8))
+        })
+        assertThrows(IllegalStateException::class.java) { legacy.liveAudio() }
+        val missingSequence = live("frame") { putByteArray("data", byteArrayOf(8)) }
+        assertThrows(IllegalArgumentException::class.java) { missingSequence.liveAudio() }
+        assertEquals(LiveAudioEvent.Interrupted, live("interrupted") {}.liveAudio())
     }
+
+    private fun live(type: String, fields: Bundle.() -> Unit): ConnectEvent = ConnectEvent("live", Bundle().apply {
+        putInt("apiVersion", ConnectClient.API_VERSION)
+        putString("type", type)
+        putLong("sessionId", 1)
+        fields()
+    })
 
     @Test fun keyboardIsSystemProtectedAndDoesNotOwnBluetooth() {
         val context = InstrumentationRegistry.getInstrumentation().targetContext

@@ -44,7 +44,10 @@ internal fun SpeechSettings(host: InputApplication) {
                 "ready" -> Text(host.localSpeech.accelerationDescription(), style = MaterialTheme.typography.bodySmall)
                 "failed" -> Text(stringResource(R.string.speech_model_retry_detail), style = MaterialTheme.typography.bodySmall)
             }
-            if (state.stage in setOf("missing", "failed")) Text(stringResource(R.string.speech_model_size), style = MaterialTheme.typography.bodySmall)
+            if (state.stage in setOf("missing", "failed")) {
+                val missing = state.total.takeIf { it > 0 } ?: speechAssets.sumOf { it.size }
+                Text(stringResource(R.string.speech_model_size, ((missing + 1_048_575) / 1_048_576).toInt()), style = MaterialTheme.typography.bodySmall)
+            }
             Text(stringResource(R.string.speech_model_privacy), style = MaterialTheme.typography.bodySmall)
             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
                 TextButton(onClick = {

@@ -1,7 +1,7 @@
 <resources>
     <string name="app_name">OpenZilo Input</string>
     <string name="setup">Ring dictation</string>
-    <string name="usage">Connect the ring in OpenZilo Connect, authorize audio access, then enable this keyboard. Hold the ring button to speak; release to insert the result. Up to 60 seconds per recording.</string>
+    <string name="usage">Connect the ring in OpenZilo Connect, authorize audio access, then enable this keyboard. Hold the ring button to speak; text appears as you talk and is polished when you release. Up to 60 seconds per recording.</string>
     <string name="open_connect">Open Connect</string>
     <string name="authorize_connect">Authorize</string>
     <string name="install_connect">Install OpenZilo Connect first.</string>
@@ -32,6 +32,7 @@
     <string name="hold_ring">Hold the ring button to speak</string>
     <string name="connecting">Connecting to OpenZilo Connect…</string>
     <string name="connect_ring_first">Connect the ring in OpenZilo Connect first.</string>
+    <string name="connect_update_required">Update OpenZilo Connect to use this version of OpenZilo Input.</string>
     <string name="incomplete_audio">Ring audio was incomplete. Try again.</string>
     <string name="listening">Listening to ring</string>
     <string name="recognizing">Recognizing…</string>

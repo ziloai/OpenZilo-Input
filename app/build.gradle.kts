@@ -39,7 +39,6 @@ val fetchSpeechRuntime = tasks.register<Exec>("fetchSpeechRuntime") {
 dependencies {
     implementation(files(speechRuntime).builtBy(fetchSpeechRuntime))
     implementation(project(":connect-api"))
-    implementation(project(":ring-core"))
     implementation("androidx.activity:activity-compose:1.13.0")
     implementation("androidx.compose.ui:ui:1.12.1")
     implementation("androidx.compose.foundation:foundation:1.12.1")
