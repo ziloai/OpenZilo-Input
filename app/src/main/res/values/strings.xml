@@ -45,6 +45,7 @@
     <string name="undo">Undo</string>
     <string name="space">Space</string>
     <string name="delete">Delete</string>
+    <string name="enter_key">Enter</string>
     <string name="retry">Retry</string>
     <string name="private_field">Dictation is off in this private field</string>
     <string name="speech_unavailable">No system speech recognition service is available.</string>

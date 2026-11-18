@@ -1,11 +1,19 @@
 package com.openzilo.input
 
-import android.content.Intent
+import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.foundation.Canvas
+import androidx.compose.foundation.layout.height
+import androidx.compose.runtime.Composable
+import androidx.compose.ui.graphics.Path
+import androidx.compose.ui.graphics.drawscope.Stroke
+import kotlin.math.PI
+import kotlin.math.sin
 import android.inputmethodservice.InputMethodService
 import android.util.Log
 import android.view.View
 import android.view.inputmethod.EditorInfo
 import android.view.inputmethod.InputMethodManager
+import android.view.inputmethod.InputConnection
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -13,6 +21,9 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.FlowRow
+import androidx.compose.foundation.layout.width
+import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
@@ -21,6 +32,7 @@ import androidx.compose.material3.TextButton
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.ComposeView
 import androidx.compose.ui.platform.ViewCompositionStrategy
@@ -28,6 +40,8 @@ import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.semantics.LiveRegionMode
 import androidx.compose.ui.semantics.liveRegion
 import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.graphics.StrokeCap
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleOwner
@@ -49,6 +63,25 @@ import kotlinx.coroutines.cancel
 import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.launch
 
+@Composable
+private fun AudioWave(level: Float, modifier: Modifier = Modifier) {
+    val amplitude = animateFloatAsState(level, label = "Ring audio level")
+    val color = MaterialTheme.colorScheme.primary
+    Canvas(modifier) {
+        val wave = Path()
+        val center = size.height / 2
+        for (step in 0..48) {
+            val t = step / 48.0
+            val envelope = sin(PI * t)
+            val offset = sin(6 * PI * t) * envelope * amplitude.value * center * 0.8
+            val y = center + offset.toFloat()
+            val x = size.width * t.toFloat()
+            if (step == 0) wave.moveTo(x, y) else wave.lineTo(x, y)
+        }
+        drawPath(wave, color, style = Stroke(width = 2.dp.toPx(), cap = StrokeCap.Round))
+    }
+}
+
 class RingInputMethodService : InputMethodService(), LifecycleOwner, SavedStateRegistryOwner, ViewModelStoreOwner {
     private val registry = LifecycleRegistry(this)
     private val saved = SavedStateRegistryController.create(this)
@@ -62,9 +95,11 @@ class RingInputMethodService : InputMethodService(), LifecycleOwner, SavedStateR
     private var state by mutableStateOf(DictationState(""))
     private var undoText by mutableStateOf("")
     private var cursor = -1
+    private var selectionStart = -1
     private var expectedUndoCursor = -1
-    private var previewLength = 0
-    private var previewStart = -1
+    private data class Preview(val connection: InputConnection, val start: Int, val end: Int, val confirmed: Boolean = false)
+    private var composing: Preview? = null
+    private var inlineSupported = true
 
     override fun onCreate() {
         super.onCreate()
@@ -86,27 +121,38 @@ class RingInputMethodService : InputMethodService(), LifecycleOwner, SavedStateR
         setContent {
             InputTheme {
                 Surface {
-                    Column(
-                        Modifier.fillMaxWidth().heightIn(min = 228.dp).navigationBarsPadding().padding(16.dp),
-                        verticalArrangement = Arrangement.spacedBy(12.dp),
-                    ) {
-                        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-                            Text(stringResource(R.string.app_name), style = MaterialTheme.typography.titleMedium)
-                            TextButton(onClick = { startActivity(Intent(this@RingInputMethodService, MainActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)) }) {
-                                Text(stringResource(R.string.settings))
+                    Column(Modifier.fillMaxWidth().navigationBarsPadding()) {
+                        HorizontalDivider()
+                        Row(
+                            Modifier.fillMaxWidth().heightIn(min = 48.dp).padding(horizontal = 16.dp),
+                            horizontalArrangement = Arrangement.spacedBy(8.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            Text(
+                                state.message,
+                                modifier = Modifier.weight(1f).semantics { liveRegion = LiveRegionMode.Polite },
+                                style = MaterialTheme.typography.bodyMedium,
+                                color = if (state.failed) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurface,
+                            )
+                            if (state.recording) {
+                                AudioWave(state.audioLevel, Modifier.width(64.dp).height(24.dp))
+                            } else if (state.failed) {
+                                TextButton(onClick = ::startDictation) { Text(stringResource(R.string.retry)) }
                             }
                         }
-                        Text(state.message, modifier = Modifier.semantics { liveRegion = LiveRegionMode.Polite }, style = MaterialTheme.typography.titleMedium,
-                            color = if (state.failed) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurface)
-                        if (state.recording) Text(stringResource(R.string.recording_duration, state.seconds), style = MaterialTheme.typography.bodyMedium)
                         if (state.processing) LinearProgressIndicator(Modifier.fillMaxWidth())
-                        if (state.preview.isNotEmpty()) Text(state.preview, maxLines = 3, style = MaterialTheme.typography.bodyLarge)
-                        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-                            TextButton(onClick = { if (!switchToNextInputMethod(false)) getSystemService(InputMethodManager::class.java).showInputMethodPicker() }) { Text(stringResource(R.string.switch_keyboard)) }
-                            TextButton(onClick = { undo() }, enabled = undoText.isNotEmpty()) { Text(stringResource(R.string.undo)) }
-                            TextButton(onClick = { clearPreview(); currentInputConnection?.commitText(" ", 1); undoText = "" }) { Text(stringResource(R.string.space)) }
-                            TextButton(onClick = { clearPreview(); delete() }) { Text(stringResource(R.string.delete)) }
-                            if (state.failed) TextButton(onClick = { startDictation() }) { Text(stringResource(R.string.retry)) }
+                        val canEdit = !state.recording && !state.processing
+                        FlowRow(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceEvenly) {
+                            TextButton(onClick = { if (!switchToNextInputMethod(false)) getSystemService(InputMethodManager::class.java).showInputMethodPicker() }) {
+                                Text(stringResource(R.string.switch_keyboard))
+                            }
+                            TextButton(onClick = ::undo, enabled = canEdit && undoText.isNotEmpty()) { Text(stringResource(R.string.undo)) }
+                            TextButton(onClick = {
+                                currentInputConnection?.commitText(" ", 1)
+                                undoText = ""
+                            }, enabled = canEdit) { Text(stringResource(R.string.space)) }
+                            TextButton(onClick = ::delete, enabled = canEdit) { Text(stringResource(R.string.delete)) }
+                            TextButton(onClick = { sendKeyChar('\n') }, enabled = canEdit) { Text(stringResource(R.string.enter_key)) }
                         }
                     }
                 }
@@ -120,6 +166,8 @@ class RingInputMethodService : InputMethodService(), LifecycleOwner, SavedStateR
         super.onStartInput(attribute, restarting)
         stopDictation()
         cursor = attribute?.initialSelEnd ?: -1
+        selectionStart = attribute?.initialSelStart ?: -1
+        inlineSupported = true
         undoText = ""
     }
 
@@ -158,11 +206,18 @@ class RingInputMethodService : InputMethodService(), LifecycleOwner, SavedStateR
 
     override fun onUpdateSelection(oldSelStart: Int, oldSelEnd: Int, newSelStart: Int, newSelEnd: Int, candidatesStart: Int, candidatesEnd: Int) {
         super.onUpdateSelection(oldSelStart, oldSelEnd, newSelStart, newSelEnd, candidatesStart, candidatesEnd)
-        if (previewLength > 0 && (newSelStart != newSelEnd || newSelEnd != previewStart + previewLength)) {
-            previewLength = 0
-            previewStart = -1
-        }
         cursor = newSelEnd
+        selectionStart = newSelStart
+        composing?.let { preview ->
+            if (candidatesStart == preview.start && candidatesEnd == preview.end &&
+                newSelStart == preview.end && newSelEnd == preview.end
+            ) {
+                composing = preview.copy(confirmed = true)
+            } else if (preview.confirmed || newSelEnd == preview.end) {
+                inlineSupported = false
+                composing = preview.copy(confirmed = false)
+            }
+        }
         if (newSelStart != newSelEnd || newSelEnd != expectedUndoCursor) undoText = ""
     }
 
@@ -180,10 +235,18 @@ class RingInputMethodService : InputMethodService(), LifecycleOwner, SavedStateR
             if (token != generation) return@launch
             try {
                 RingDictation(this@RingInputMethodService,
-                    update = { if (token == generation) state = it },
-                    preview = { text -> token == generation && visible && preview(text) },
+                    update = { next ->
+                        if (token == generation) {
+                            if (next.recording && next.preview != state.preview && visible) {
+                                if (next.preview.isNotEmpty()) showPreview(next.preview)
+                                else if (composing?.confirmed == true && inlineSupported) clearPreview()
+                            } else if (!next.recording && !next.processing) {
+                                clearPreview()
+                            }
+                            state = next
+                        }
+                    },
                     commit = { text -> token == generation && visible && commit(text) },
-                    clearPreview = { if (token == generation) clearPreview() },
                 ).run()
             } catch (error: CancellationException) {
                 if (error is TimeoutCancellationException && token == generation)
@@ -192,6 +255,8 @@ class RingInputMethodService : InputMethodService(), LifecycleOwner, SavedStateR
             } catch (error: Exception) {
                 Log.e("OpenZiloInput", "Dictation connection or subscription failed", error)
                 if (token == generation) state = DictationState(error.message ?: getString(R.string.connect_stopped), failed = true)
+            } finally {
+                if (token == generation) clearPreview()
             }
         }
     }
@@ -203,39 +268,44 @@ class RingInputMethodService : InputMethodService(), LifecycleOwner, SavedStateR
         clearPreview()
     }
 
-    private fun preview(text: String): Boolean {
-        if (text.isEmpty()) return false
-        val info = currentInputEditorInfo ?: return false
-        if (!permitsDictation(info.inputType, info.imeOptions)) return false
-        val connection = currentInputConnection ?: return false
-        val start = if (previewLength > 0) previewStart else cursor
-        if (start < 0) return false
-        if (!connection.setComposingText(text, 1)) return false
-        previewStart = start
-        previewLength = text.length
-        return true
+    private fun showPreview(text: String) {
+        val info = currentInputEditorInfo ?: return
+        if (!permitsDictation(info.inputType, info.imeOptions)) return
+        val connection = currentInputConnection ?: return
+        val previous = composing
+        if (!inlineSupported || (previous != null && (!previous.confirmed || previous.connection !== connection))) return
+        if (previous == null && (cursor < 0 || selectionStart != cursor)) return
+        val start = previous?.start ?: cursor
+        val expected = Preview(connection, start, start + text.length, previous?.end == start + text.length)
+        if (connection.setComposingText(text, 1)) composing = expected
+        else inlineSupported = false
+    }
+
+    private fun clearPreview() {
+        val preview = composing ?: return
+        composing = null
+        if (preview.confirmed && currentInputConnection === preview.connection) {
+            preview.connection.setComposingText("", 1)
+            preview.connection.finishComposingText()
+        } else inlineSupported = false
     }
 
     private fun commit(text: String): Boolean {
         val info = currentInputEditorInfo ?: return false
         if (!permitsDictation(info.inputType, info.imeOptions)) return false
         val connection = currentInputConnection ?: return false
-        val start = if (previewLength > 0) previewStart else cursor
-        val committed = connection.commitText(text, 1)
-        if (!committed) return false
-        previewLength = 0
-        previewStart = -1
+        val preview = composing
+        if (preview != null && (!preview.confirmed || preview.connection !== connection)) {
+            inlineSupported = false
+            return false
+        }
+        val start = preview?.start ?: minOf(selectionStart, cursor)
+        if (!connection.commitText(text, 1)) return false
+        composing = null
         expectedUndoCursor = if (start >= 0) start + text.length else -1
         undoText = if (start >= 0) text else ""
         cursor = expectedUndoCursor
         return true
-    }
-
-    private fun clearPreview() {
-        if (previewLength <= 0) return
-        previewLength = 0
-        previewStart = -1
-        currentInputConnection?.setComposingText("", 1)
     }
 
     private fun undo() {

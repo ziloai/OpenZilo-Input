@@ -2,11 +2,15 @@ package com.openzilo.input
 
 import android.content.Context
 import android.os.Bundle
+import android.os.SystemClock
 import android.util.Log
 import com.openzilo.connect.api.ConnectClient
 import com.openzilo.connect.api.LiveAudioEvent
 import java.io.ByteArrayOutputStream
 import java.io.IOException
+import java.nio.ByteBuffer
+import java.nio.ByteOrder
+import kotlin.math.sqrt
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
@@ -25,6 +29,7 @@ import kotlinx.coroutines.withTimeoutOrNull
 
 internal data class DictationState(
     val message: String,
+    val audioLevel: Float = 0f,
     val preview: String = "",
     val recording: Boolean = false,
     val processing: Boolean = false,
@@ -32,14 +37,24 @@ internal data class DictationState(
     val failed: Boolean = false,
 )
 
+internal fun pcmAudioLevel(pcm: ByteArray): Float {
+    val samples = ByteBuffer.wrap(pcm).order(ByteOrder.nativeOrder()).asShortBuffer()
+    val count = samples.remaining()
+    if (count == 0) return 0f
+    var energy = 0.0
+    while (samples.hasRemaining()) {
+        val sample = samples.get() / 32768.0
+        energy += sample * sample
+    }
+    return (sqrt(energy / count) * 5).toFloat().coerceIn(0f, 1f)
+}
+
 private data class CapturedAudio(val pcm: ByteArray, val sampleRate: Int, val streamingText: String)
 
 internal class RingDictation(
     private val context: Context,
     private val update: (DictationState) -> Unit,
-    private val preview: (String) -> Boolean,
     private val commit: (String) -> Boolean,
-    private val clearPreview: () -> Unit,
 ) {
     private suspend fun finalize(audio: CapturedAudio) {
         val whole = withTimeout(75_000) {
@@ -52,12 +67,11 @@ internal class RingDictation(
         }.trim()
         val text = polishTranscript(whole.ifEmpty { audio.streamingText })
         if (text.isEmpty()) {
-            clearPreview()
             update(DictationState(context.getString(R.string.speech_no_match), failed = true))
             return
         }
         val accepted = commit(text)
-        update(DictationState(context.getString(if (accepted) R.string.inserted else R.string.input_rejected), preview = text, failed = !accepted))
+        update(DictationState(context.getString(if (accepted) R.string.inserted else R.string.input_rejected), failed = !accepted))
     }
 
     suspend fun run(): Unit = coroutineScope {
@@ -83,15 +97,25 @@ internal class RingDictation(
                                 session?.abort()
                                 session = null
                                 if (recognition?.isActive == true) return@collect
-                                val live = LiveSession(host, value.sessionId, value.channels, preview)
-                                live.start(this)
+                                val live = LiveSession(host, value.sessionId, value.channels)
                                 session = live
-                                update(DictationState(context.getString(R.string.listening), recording = true))
+                                var liveState = DictationState(context.getString(R.string.listening), recording = true)
+                                update(liveState)
+                                live.start(this, onPreview = { text ->
+                                    if (session === live) {
+                                        liveState = liveState.copy(preview = text)
+                                        update(liveState)
+                                    }
+                                }, onLevel = { level ->
+                                    if (session === live) {
+                                        liveState = liveState.copy(audioLevel = level, seconds = live.count / 50)
+                                        update(liveState)
+                                    }
+                                })
                             }
                             is LiveAudioEvent.Frame -> {
                                 val live = session ?: return@collect
                                 live.add(value)
-                                update(DictationState(context.getString(R.string.listening), recording = true, seconds = live.count / 50))
                             }
                             is LiveAudioEvent.Ended -> {
                                 val live = session ?: return@collect
@@ -110,14 +134,12 @@ internal class RingDictation(
                                         finalize(audio)
                                     } catch (error: TimeoutCancellationException) {
                                         live.abort()
-                                        clearPreview()
                                         update(DictationState(context.getString(R.string.speech_failed), failed = true))
                                     } catch (error: CancellationException) {
                                         throw error
                                     } catch (error: Exception) {
                                         Log.e("OpenZiloInput", "Audio decoding or recognition failed", error)
                                         live.abort()
-                                        clearPreview()
                                         update(DictationState(error.message ?: context.getString(R.string.speech_failed), failed = true))
                                     }
                                 }
@@ -132,7 +154,6 @@ internal class RingDictation(
                         Log.e("OpenZiloInput", "Ring audio delivery failed", error)
                         session?.abort()
                         session = null
-                        clearPreview()
                         update(DictationState(context.getString(R.string.incomplete_audio), failed = true))
                     }
                 }
@@ -161,7 +182,6 @@ private class LiveSession(
     private val host: InputApplication,
     private val sessionId: Long,
     channels: Int,
-    private val preview: (String) -> Boolean,
 ) {
     private var received = 0
     private var receivedBytes = 0L
@@ -172,10 +192,13 @@ private class LiveSession(
 
     val count: Int get() = received
 
-    fun start(scope: CoroutineScope) {
+    fun start(scope: CoroutineScope, onPreview: (String) -> Unit, onLevel: (Float) -> Unit) {
         worker = scope.launch(Dispatchers.Default) {
             try {
-                result.complete(capture())
+                result.complete(capture(
+                    publishPreview = { text -> withContext(Dispatchers.Main.immediate) { onPreview(text) } },
+                    publishLevel = { level -> withContext(Dispatchers.Main.immediate) { onLevel(level) } },
+                ))
             } catch (error: CancellationException) {
                 result.cancel(error)
                 throw error
@@ -206,7 +229,10 @@ private class LiveSession(
         worker?.cancel()
     }
 
-    private suspend fun capture(): CapturedAudio {
+    private suspend fun capture(
+        publishPreview: suspend (String) -> Unit,
+        publishLevel: suspend (Float) -> Unit,
+    ): CapturedAudio {
         var streamingReady = false
         try {
             host.beginStreaming()
@@ -222,10 +248,16 @@ private class LiveSession(
         try {
             val pending = ByteArrayOutputStream()
             var pendingSamples = 0
+            var lastLevelAt = -50L
             for (packet in channel) {
                 val chunk = decoder.feed(packet)
                 if (chunk.isEmpty()) continue
                 pcm.write(chunk)
+                val now = SystemClock.elapsedRealtime()
+                if (now - lastLevelAt >= 50) {
+                    publishLevel(pcmAudioLevel(chunk))
+                    lastLevelAt = now
+                }
                 if (!streamingReady) continue
                 pending.write(chunk)
                 pendingSamples += chunk.size / 2
@@ -240,9 +272,9 @@ private class LiveSession(
                     streamingReady = false
                     ""
                 }
-                if (text.isNotEmpty() && text != lastPreview) {
+                if (text != lastPreview) {
                     lastPreview = text
-                    withContext(Dispatchers.Main.immediate) { preview(text) }
+                    publishPreview(text)
                 }
             }
             pcm.write(decoder.finish())
