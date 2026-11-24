@@ -34,6 +34,15 @@ Use JDK 21 (as in CI), Python 3 available as `python3`, and Android SDK Platform
 
 The APK is built at `app/build/outputs/apk/debug/app-debug.apk`. Gradle fetches the sherpa-onnx runtime at build time; the app downloads the speech models separately.
 
+## Community
+
+- WeChat developer group
+
+  <img src="docs/assets/wechat-group.png" alt="OpenZilo WeChat developer group QR code" width="160">
+
+- [Discord](https://discord.gg/pTJZ3RMHA5)
+- [GitHub Discussions](https://github.com/ziloai/OpenZilo/discussions)
+
 ## License
 
 OpenZilo Input source code is licensed under the [Mozilla Public License 2.0](LICENSE). Third-party components and models retain their own licenses, including the [sherpa-onnx runtime license](app/src/main/assets/sherpa-onnx/LICENSE).

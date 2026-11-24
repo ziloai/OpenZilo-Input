@@ -34,6 +34,15 @@
 
 生成的 APK 位于 `app/build/outputs/apk/debug/app-debug.apk`。Gradle 在构建时下载 sherpa-onnx 运行库；语音模型由应用另行下载。
 
+## 社区
+
+- 微信开发者群
+
+  <img src="docs/assets/wechat-group.png" alt="OpenZilo 开发者微信群二维码" width="160">
+
+- [Discord](https://discord.gg/pTJZ3RMHA5)
+- [GitHub Discussions](https://github.com/ziloai/OpenZilo/discussions)
+
 ## 许可证
 
 OpenZilo 输入法的源代码采用 [Mozilla Public License 2.0](LICENSE)。第三方组件和模型沿用各自的许可证，包括 [sherpa-onnx 运行库的许可证](app/src/main/assets/sherpa-onnx/LICENSE)。
