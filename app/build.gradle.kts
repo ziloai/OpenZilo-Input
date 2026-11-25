@@ -38,7 +38,7 @@ val fetchSpeechRuntime = tasks.register<Exec>("fetchSpeechRuntime") {
 }
 dependencies {
     implementation(files(speechRuntime).builtBy(fetchSpeechRuntime))
-    implementation("io.github.ziloai:connect-api:0.1.1@aar")
+    implementation("com.openzilo:connect-api:0.1.2")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.10.2")
     implementation("androidx.activity:activity-compose:1.13.0")
     implementation("androidx.compose.ui:ui:1.12.1")
