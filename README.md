@@ -4,8 +4,6 @@
 
 Hold the button on your OpenZilo ring and speak. OpenZilo Input turns your voice into text in the Android app you already have open. Release the button to finish dictating and insert the result at the cursor. It never sends the message for you.
 
-<a href="docs/assets/ring-dictation.mp4"><img src="docs/assets/ring-dictation.gif" alt="OpenZilo Input receives ring audio and inserts the transcription into a notes app" width="300"></a>
-
 [Open the 9-second demo with sound (MP4)](docs/assets/ring-dictation.mp4)
 
 ## Get started
